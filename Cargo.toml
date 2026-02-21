@@ -1,0 +1,13 @@
+[package]
+name = "ping-proto"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ringline-rs/ping-proto"
+description = "Simple ASCII PING/PONG protocol implementation"
+readme = "README.md"
+keywords = ["ping", "pong", "protocol", "parser"]
+categories = ["network-programming", "parsing"]
+
+[dependencies]
+thiserror = "2"
