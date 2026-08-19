@@ -40,6 +40,23 @@ pub enum Request {
 }
 
 impl Request {
+    /// Parse a request from the buffer.
+    ///
+    /// Returns the parsed request and number of bytes consumed, or an error.
+    pub fn parse(data: &[u8]) -> Result<(Self, usize), ParseError> {
+        const PING_CMD: &[u8] = b"PING\r\n";
+
+        if data.starts_with(PING_CMD) {
+            return Ok((Self::Ping, PING_CMD.len()));
+        }
+
+        if PING_CMD.starts_with(data) {
+            return Err(ParseError::Incomplete);
+        }
+
+        Err(ParseError::Invalid)
+    }
+
     /// Encode the request into the buffer.
     ///
     /// Returns the number of bytes written.
@@ -142,6 +159,9 @@ impl Response {
     }
 }
 
+#[cfg(kani)]
+mod verification;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +172,25 @@ mod tests {
         let len = Request::Ping.encode(&mut buf);
         assert_eq!(&buf[..len], b"PING\r\n");
         assert_eq!(len, 6);
+    }
+
+    #[test]
+    fn test_parse_ping_request() {
+        let input = b"PING\r\ntrailing";
+        let before = *input;
+        let (request, consumed) = Request::parse(input).unwrap();
+
+        assert_eq!(request, Request::Ping);
+        assert_eq!(consumed, 6);
+        assert_eq!(input, &before);
+        assert!(matches!(
+            Request::parse(b"PING\r"),
+            Err(ParseError::Incomplete)
+        ));
+        assert!(matches!(
+            Request::parse(b"PUNG\r\n"),
+            Err(ParseError::Invalid)
+        ));
     }
 
     #[test]
