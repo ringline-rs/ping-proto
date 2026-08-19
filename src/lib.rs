@@ -21,6 +21,15 @@
 //! assert_eq!(consumed, 6);
 //! ```
 
+/// Default maximum length of a single response line, in bytes.
+///
+/// Applies to the RESP-style `+...` and `-...` forms, whose length is not known
+/// in advance. Without a bound an unterminated line makes the parser report
+/// `Incomplete` no matter how large the buffer grows, so a peer that never
+/// sends a newline can make a caller buffer without limit. Matches Redis's
+/// `PROTO_INLINE_MAX_SIZE`.
+pub const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024;
+
 /// Parse error types.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ParseError {
@@ -43,6 +52,10 @@ impl Request {
     /// Encode the request into the buffer.
     ///
     /// Returns the number of bytes written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf` is shorter than [`Self::encoded_len`].
     pub fn encode(self, buf: &mut [u8]) -> usize {
         const PING_CMD: &[u8] = b"PING\r\n";
         let len = PING_CMD.len();
@@ -71,7 +84,22 @@ impl Response {
     /// Returns the parsed response and number of bytes consumed, or an error.
     ///
     /// Accepts both simple ASCII `PONG\r\n` and RESP-style `+PONG\r\n`.
+    ///
+    /// Uses [`DEFAULT_MAX_LINE_LEN`] as the line-length bound; see
+    /// [`Self::parse_with_max_line_len`] to change it.
     pub fn parse(data: &[u8]) -> Result<(Self, usize), ParseError> {
+        Self::parse_with_max_line_len(data, DEFAULT_MAX_LINE_LEN)
+    }
+
+    /// Parse a response with an explicit maximum line length.
+    ///
+    /// An unterminated `+...` or `-...` line longer than `max_line_len` is
+    /// rejected as [`ParseError::Invalid`] rather than reported as
+    /// [`ParseError::Incomplete`] forever.
+    pub fn parse_with_max_line_len(
+        data: &[u8],
+        max_line_len: usize,
+    ) -> Result<(Self, usize), ParseError> {
         const PONG_SIMPLE: &[u8] = b"PONG\r\n";
         const PONG_RESP: &[u8] = b"+PONG\r\n";
 
@@ -93,6 +121,9 @@ impl Response {
             if let Some(pos) = data.iter().position(|&b| b == b'\n') {
                 return Ok((Response::Pong, pos + 1));
             }
+            if data.len() > max_line_len {
+                return Err(ParseError::Invalid);
+            }
             return Err(ParseError::Incomplete);
         }
 
@@ -112,6 +143,9 @@ impl Response {
             if let Some(pos) = data.iter().position(|&b| b == b'\n') {
                 return Ok((Response::Error, pos + 1));
             }
+            if data.len() > max_line_len {
+                return Err(ParseError::Invalid);
+            }
             return Err(ParseError::Incomplete);
         }
 
@@ -127,6 +161,10 @@ impl Response {
     /// Encode the response into the buffer.
     ///
     /// Returns the number of bytes written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf` is shorter than 6 bytes.
     pub fn encode(self, buf: &mut [u8]) -> usize {
         let data = match self {
             Response::Pong => b"PONG\r\n",
@@ -145,6 +183,43 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unterminated_line_is_bounded() {
+        // Without a bound these reported Incomplete forever, so a peer that
+        // never sends a newline could make a caller buffer without limit.
+        let mut flood = vec![b'+'];
+        flood.extend(std::iter::repeat_n(b'x', DEFAULT_MAX_LINE_LEN));
+        assert!(matches!(Response::parse(&flood), Err(ParseError::Invalid)));
+
+        let mut err_flood = vec![b'-'];
+        err_flood.extend(std::iter::repeat_n(b'x', DEFAULT_MAX_LINE_LEN));
+        assert!(matches!(
+            Response::parse(&err_flood),
+            Err(ParseError::Invalid)
+        ));
+
+        // At or below the bound it is still just "need more data".
+        let mut ok = vec![b'+'];
+        ok.extend(std::iter::repeat_n(b'x', DEFAULT_MAX_LINE_LEN - 1));
+        assert!(matches!(Response::parse(&ok), Err(ParseError::Incomplete)));
+
+        // The bound is configurable.
+        assert!(matches!(
+            Response::parse_with_max_line_len(b"+xxxxxxxx", 4),
+            Err(ParseError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn normal_responses_still_parse() {
+        assert_eq!(Response::parse(b"PONG\r\n").unwrap(), (Response::Pong, 6));
+        assert_eq!(Response::parse(b"+PONG\r\n").unwrap(), (Response::Pong, 7));
+        assert_eq!(
+            Response::parse(b"-ERR something\r\n").unwrap(),
+            (Response::Error, 16)
+        );
+    }
 
     #[test]
     fn test_encode_ping() {
