@@ -11,3 +11,6 @@ categories = ["network-programming", "parsing"]
 
 [dependencies]
 thiserror = "2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
